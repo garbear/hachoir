@@ -6,7 +6,11 @@ from hachoir_core.field.sub_file import SubFile, CompressedField
 from hachoir_core.field.character import Character
 from hachoir_core.field.integer import (
     Int8,  Int16,  Int24,  Int32,  Int64,
+    Int16BE,  Int24BE,  Int32BE,  Int64BE,
+    Int16LE,  Int24LE,  Int32LE,  Int64LE,
     UInt8, UInt16, UInt24, UInt32, UInt64,
+    UInt16BE, UInt24BE, UInt32BE, UInt64BE,
+    UInt16LE, UInt24LE, UInt32LE, UInt64LE,
     GenericInteger)
 from hachoir_core.field.enum import Enum
 from hachoir_core.field.string_field import (GenericString,
