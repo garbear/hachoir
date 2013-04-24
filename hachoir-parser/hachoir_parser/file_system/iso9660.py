@@ -11,27 +11,39 @@ Creation: 11 july 2006
 
 from hachoir_parser import Parser
 from hachoir_core.field import (FieldSet, ParserError,
-    UInt8, UInt32, UInt64, Enum,
+    UInt8, UInt16, UInt16BE, UInt32, UInt32BE, Enum,
     NullBytes, RawBytes, String)
 from hachoir_core.endian import LITTLE_ENDIAN, BIG_ENDIAN
 
 class PrimaryVolumeDescriptor(FieldSet):
+    endian = LITTLE_ENDIAN
     static_size = 2041*8
     def createFields(self):
         yield NullBytes(self, "unused[]", 1)
         yield String(self, "system_id", 32, "System identifier", strip=" ")
         yield String(self, "volume_id", 32, "Volume identifier", strip=" ")
         yield NullBytes(self, "unused[]", 8)
-        yield UInt64(self, "space_size", "Volume space size")
+
+        # doc below, iso9660 uses both endian
+
+        yield UInt32(self, "space_size_l", "Volume space size Type L")
+        yield UInt32BE(self, "space_size_m", "Volume space size Type M")
         yield NullBytes(self, "unused[]", 32)
-        yield UInt32(self, "set_size", "Volume set size")
-        yield UInt32(self, "seq_num", "Sequence number")
-        yield UInt32(self, "block_size", "Block size")
-        yield UInt64(self, "path_table_size", "Path table size")
+        yield UInt16(self, "set_size_l", "Volume set size Type L")
+        yield UInt16BE(self, "set_size_m", "Volume set size Type M")
+        yield UInt16(self, "seq_num_l", "Volume Sequence number Type L")
+        yield UInt16BE(self, "seq_num_m", "Volume Sequence number Type L")
+        yield UInt16(self, "block_size_l", "Block size Type L")
+        yield UInt16BE(self, "block_size_m", "Block size Type M")
+
+        # Temp documentation: https://casper.berkeley.edu/svn/trunk/roach/sw/uboot/disk/part_iso.h
+
+        yield UInt32(self, "path_table_size_l", "Path table size Type L")
+        yield UInt32BE(self, "path_table_size_m", "Path table size Type M")
         yield UInt32(self, "occu_lpath", "Location of Occurrence of Type L Path Table")
         yield UInt32(self, "opt_lpath", "Location of Optional of Type L Path Table")
-        yield UInt32(self, "occu_mpath", "Location of Occurrence of Type M Path Table")
-        yield UInt32(self, "opt_mpath", "Location of Optional of Type M Path Table")
+        yield UInt32BE(self, "occu_mpath", "Location of Occurrence of Type M Path Table")
+        yield UInt32BE(self, "opt_mpath", "Location of Optional of Type M Path Table")
         yield RawBytes(self, "root", 34, "Directory Record for Root Directory")
         yield String(self, "vol_set_id", 128, "Volume set identifier", strip=" ")
         yield String(self, "publisher", 128, "Publisher identifier", strip=" ")
@@ -90,6 +102,20 @@ class Volume(FieldSet):
         else:
             yield RawBytes(self, "raw_content", 2048-7)
 
+class PathTable(FieldSet):
+    endian = LITTLE_ENDIAN
+    def createFields(self):
+        islsb = self._parent["volume[0]/content/occu_lpath"].value > 0
+        UInt16_ = UInt16 if islsb else UInt16BE
+        UInt32_ = UInt32 if islsb else UInt32BE
+        yield UInt8(self, "length", "Length of Directory Identifier")
+        yield UInt8(self, "attr_length", "Extended Attribute Record Length")
+        yield UInt32_(self, "location", "Location of Extent where the directory is recorded (LBA)")
+        yield UInt16_(self, "parent_dir", "Parent Directory Number in the path table")
+        yield String(self, "name", self["length"].value, "Directory Identifier (name)", strip=" ")
+        if self["length"].value % 2:
+            yield NullBytes(self, "unused[]", 1)
+
 class ISO9660(Parser):
     endian = LITTLE_ENDIAN
     MAGIC = "\x01CD001"
@@ -110,11 +136,31 @@ class ISO9660(Parser):
     def createFields(self):
         yield self.seekByte(self.NULL_BYTES, null=True)
 
+        pathtable_offset = 0
+        pathtable_size = 0
+
         while True:
             volume = Volume(self, "volume[]")
             yield volume
-            if volume["type"].value == Volume.TERMINATOR:
+            if volume["type"].value == 1: # PrimaryVolumeDescriptor
+                # Multiply LBA by sector size to get index offset
+                pathtable_offset = volume["content/occu_lpath"].value * 2048
+                pathtable_size = volume["content/path_table_size_l"].value
+                # Fall back to MSB path table if necessary
+                if not pathtable_offset and volume["content/occu_mpath"].value:
+                    pathtable_offset = volume["content/occu_mpath"].value * 2048
+                    pathtable_size = volume["content/path_table_size_m"].value
+            elif volume["type"].value == Volume.TERMINATOR:
                 break
+
+        if pathtable_offset:
+            yield self.seekByte(pathtable_offset, relative=False, null=True)
+            while True:
+                pathtable = PathTable(self, "path[]")
+                yield pathtable
+                currentpath = (pathtable.absolute_address >> 3) + (pathtable.size >> 3)
+                if currentpath >= pathtable_offset + pathtable_size:
+                    break 
 
         if self.current_size < self._size:
             yield self.seekBit(self._size, "end")
